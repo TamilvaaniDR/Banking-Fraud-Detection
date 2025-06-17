@@ -1,10 +1,10 @@
 import streamlit as st
-import joblib
 import pandas as pd
 from pymongo import MongoClient
 from streamlit_lottie import st_lottie
 import requests
 import matplotlib.pyplot as plt
+from datetime import datetime
 
 # ===== PAGE CONFIG =====
 st.set_page_config(page_title="Fraud Detection Login", page_icon="🔐", layout="centered")
@@ -14,11 +14,6 @@ client = MongoClient("mongodb://localhost:27017/")
 db = client["fraud_detection"]
 users_collection = db["users"]
 transactions = db["transactions"]
-
-# ===== Load model and encoders =====
-model = joblib.load("fraud_model.pkl")
-le_country = joblib.load("le_country.pkl")
-le_ip_country = joblib.load("le_ip_country.pkl")
 
 # ===== LOTTIE ANIMATION FUNCTION =====
 def load_lottie_url(url):
@@ -45,6 +40,22 @@ def get_country_from_ip(ip):
     elif ip.startswith("36."): return "China"
     elif ip.startswith("45."): return "Nigeria"
     else: return "Unknown"
+
+# ===== Rule-based fraud detection =====
+def check_fraud(ip_address, country, amount, transaction_time):
+    country_from_ip = get_country_from_ip(ip_address)
+
+    if country != country_from_ip:
+        return "FRAUD"
+
+    hour = datetime.strptime(transaction_time, "%H:%M").hour
+    if hour < 6 or hour > 22:
+        return "FRAUD"
+
+    if amount > 5000:
+        return "FRAUD"
+
+    return "NON-FRAUD"
 
 # ===== Session Init =====
 if "logged_in" not in st.session_state:
@@ -77,14 +88,13 @@ if not st.session_state.logged_in:
             if user:
                 st.session_state.logged_in = True
                 st.success(f"🎉 Welcome, {username}!")
-                st.rerun()  # ✅ use st.rerun() instead of experimental
+                st.rerun()
             else:
                 st.error("❌ Invalid credentials.")
 
 # ===== MAIN APP AFTER LOGIN =====
 if st.session_state.logged_in:
 
-    # ===== Custom Header Style =====
     st.markdown(
         """
         <style>
@@ -105,45 +115,32 @@ if st.session_state.logged_in:
         unsafe_allow_html=True
     )
 
-    # ===== TABS =====
     tab1, tab2, tab3 = st.tabs(["🔍 Predict Fraud", "📋 View Stored Logs", "📊 Visual Analysis"])
 
-    # === TAB 1: Prediction ===
     with tab1:
         st.markdown("### 🧾 Prediction Form")
         ip_address = st.text_input("Enter IP Address (e.g., 49.36.77.18)")
-        user_country = st.selectbox("Select User-Declared Country", sorted(le_country.classes_))
+        user_country = st.text_input("Enter Country", "India")
         amount = st.number_input("Enter Transaction Amount (₹)", min_value=1, step=1, format="%d")
+        time_input = st.time_input("Enter Transaction Time (HH:MM)", value=datetime.now())
 
-        if st.button("Predict"):
+        if st.button("Check Fraud"):
+            transaction_time = time_input.strftime("%H:%M")
             country_from_ip = get_country_from_ip(ip_address)
+            result = check_fraud(ip_address, user_country, amount, transaction_time)
             st.write(f"📍 IP maps to country: **{country_from_ip}**")
+            st.success(f"Prediction: {'🚨 FRAUD' if result == 'FRAUD' else '✅ LEGIT'}")
 
-            try:
-                encoded_country = le_country.transform([user_country])[0]
-                encoded_ip_country = le_ip_country.transform([country_from_ip])[0]
-            except:
-                st.error("❌ Country not found in training data.")
-                st.stop()
-
-            input_df = pd.DataFrame([[encoded_country, encoded_ip_country, amount]],
-                                    columns=["country", "country_from_ip", "amount"])
-            
-            prediction = model.predict(input_df)[0]
-            result = "🚨 FRAUD" if prediction == 1 else "✅ LEGIT"
-            st.success(f"Prediction: {result}")
-
-            # Save to DB
             transactions.insert_one({
                 "ip_address": ip_address,
                 "user_country": user_country,
                 "country_from_ip": country_from_ip,
                 "amount": amount,
+                "transaction_time": transaction_time,
                 "prediction": result
             })
             st.info("📦 Transaction saved to MongoDB")
 
-    # === TAB 2: Logs ===
     with tab2:
         st.markdown("### 📋 Stored Transactions")
         all_data = list(transactions.find({}, {"_id": 0}))
@@ -155,7 +152,9 @@ if st.session_state.logged_in:
         else:
             st.warning("No transactions logged yet.")
 
-    # === TAB 3: Chart ===
+
+    
+
     with tab3:
         st.markdown("### 📊 Fraud vs Legit Chart")
         all_data = list(transactions.find({}, {"_id": 0}))
